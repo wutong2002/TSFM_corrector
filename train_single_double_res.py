@@ -128,7 +128,7 @@ def main():
     if args.corrector not in CORRECTOR_CONFIGS: raise ValueError(f"Unknown Corrector: {args.corrector}")
     if args.grid_mode not in SEARCH_GRIDS: raise ValueError(f"Unknown Grid Mode: {args.grid_mode}")
 
-    db_config = ENCODER_CONFIGS[args.encoder]
+    db_config = ENCODER_CONFIGS[args.encoder].copy()
     db_config['data_dir'] = args.data_root
     db_config['context_len'] = 512
     base_corrector_cfg = CORRECTOR_CONFIGS[args.corrector]
@@ -146,6 +146,7 @@ def main():
 
     for idx, params in enumerate(param_combinations):
         current_train_cfg = BASE_CONFIG.copy()
+        current_train_cfg['seed'] = args.seed
         
         # [关键修复 2] 将 Alpha 和 Beta 写入配置
         current_train_cfg['retrieval_alpha'] = args.retrieval_alpha 

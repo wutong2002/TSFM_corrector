@@ -1,6 +1,7 @@
 import importlib
 import os
 import pickle
+import re
 import pandas as pd
 import torch
 import torch.optim as optim
@@ -296,7 +297,8 @@ class CorrectionTrainer:
 
     def _get_optimizer(self):
         if len(list(self.model.parameters())) == 0: return None
-        lr = self.train_config.get('lr', 1e-4)
+        # 兼容两套命名：优先读取网格配置里的 learning_rate
+        lr = self.train_config.get('learning_rate', self.train_config.get('lr', 1e-4))
         wd = self.weight_decay
         if self.optimizer_type == 'adamw': return optim.AdamW(self.model.parameters(), lr=lr, weight_decay=wd)
         elif self.optimizer_type == 'adam': return optim.Adam(self.model.parameters(), lr=lr, weight_decay=wd)
@@ -483,6 +485,19 @@ class CorrectionTrainer:
         train_counters = defaultdict(int)
         test_counters = defaultdict(int)
         
+        group_by_parent = bool(self.train_config.get('group_by_parent_item_id', 1))
+
+        def _parent_key(item):
+            meta = item.get('sample_meta', {}) or {}
+            parent = meta.get('parent_item_id')
+            if parent is not None and str(parent).strip() != "":
+                return f"parent::{str(parent)}"
+            item_id = str(meta.get('item_id', '')).strip()
+            if item_id:
+                return "item::" + re.sub(r'_dim\d+$', '', item_id)
+            seq_id = meta.get('seq_id', -1)
+            return f"seq::{seq_id}"
+
         for ds_name, items_list in loaded_items_by_ds.items():
             
             # --- 模式 3: Cross Dataset (完全互斥隔离) ---
@@ -501,8 +516,11 @@ class CorrectionTrainer:
             elif split_mode == 'seq_per_dataset':
                 seq_dict = defaultdict(list)
                 for tsfm, item in items_list:
-                    seq_id = item.get('sample_meta', {}).get('seq_id', -1)
-                    seq_dict[seq_id].append((tsfm, item))
+                    if group_by_parent:
+                        group_id = _parent_key(item)
+                    else:
+                        group_id = item.get('sample_meta', {}).get('seq_id', -1)
+                    seq_dict[group_id].append((tsfm, item))
                     
                 unique_seqs = sorted(list(seq_dict.keys()))
                 rs = np.random.RandomState(self.train_config.get('seed', 2025))
@@ -541,8 +559,11 @@ class CorrectionTrainer:
             elif split_mode == 'temporal_per_seq':
                 seq_dict = defaultdict(list)
                 for tsfm, item in items_list:
-                    seq_id = item.get('sample_meta', {}).get('seq_id', -1)
-                    seq_dict[seq_id].append((tsfm, item))
+                    if group_by_parent:
+                        group_id = _parent_key(item)
+                    else:
+                        group_id = item.get('sample_meta', {}).get('seq_id', -1)
+                    seq_dict[group_id].append((tsfm, item))
                     
                 is_train_ds = ds_name in train_targets
                 is_test_ds = ds_name in test_targets
@@ -552,10 +573,11 @@ class CorrectionTrainer:
 
                 for seq_id, seq_items in seq_dict.items():
                     if not seq_items: continue
-                    # 按照历史起始时间戳从小到大排序
-                    seq_items.sort(key=lambda x: x[1].get('sample_meta', {}).get('hist_start', 0))
                     
                     if is_test_ds:
+                        # 按照历史起始时间戳从小到大排序
+                        seq_items.sort(key=lambda x: x[1].get('sample_meta', {}).get('hist_start', 0))
+
                         # 0. 可选策略：剔除最后一个窗口（通常最后一个窗口可能截断或包含边缘数据）
                         if drop_last_window and len(seq_items) > 1:
                             seq_items = seq_items[:-1]
@@ -563,16 +585,34 @@ class CorrectionTrainer:
                         if not seq_items:
                             continue
                             
-                        # 计算 80/20 切分点
-                        n_total = len(seq_items)
-                        split_idx = int(n_total * 0.8)
-                        
-                        # 极端短序列保护：如果切分导致测试集为空但总长度大于0，强制至少留 1 个给测试集
-                        if split_idx == n_total and n_total > 0:
-                            split_idx = n_total - 1 
-
-                        train_part = seq_items[:split_idx]
-                        test_part = seq_items[split_idx:]
+                        # 计算 80/20 切分点：
+                        # 若启用 group_by_parent，则先按时间戳分桶，确保同一 parent 下同一时间步的不同通道不被切开。
+                        if group_by_parent:
+                            buckets = defaultdict(list)
+                            for tsfm, item in seq_items:
+                                h_start = item.get('sample_meta', {}).get('hist_start', -1)
+                                buckets[h_start].append((tsfm, item))
+                            unique_starts = sorted(buckets.keys())
+                            n_total = len(unique_starts)
+                            split_idx = int(n_total * 0.8)
+                            if split_idx == n_total and n_total > 0:
+                                split_idx = n_total - 1
+                            train_starts = set(unique_starts[:split_idx])
+                            test_starts = set(unique_starts[split_idx:])
+                            train_part, test_part = [], []
+                            for h_start in unique_starts:
+                                if h_start in train_starts:
+                                    train_part.extend(buckets[h_start])
+                                elif h_start in test_starts:
+                                    test_part.extend(buckets[h_start])
+                        else:
+                            n_total = len(seq_items)
+                            split_idx = int(n_total * 0.8)
+                            # 极端短序列保护：如果切分导致测试集为空但总长度大于0，强制至少留 1 个给测试集
+                            if split_idx == n_total and n_total > 0:
+                                split_idx = n_total - 1 
+                            train_part = seq_items[:split_idx]
+                            test_part = seq_items[split_idx:]
                         
                         # 1. 前 80% 窗口：倒进数据库(Train)
                         for tsfm, item in train_part:
@@ -612,6 +652,46 @@ class CorrectionTrainer:
         self.log("="*60 + "\n")
         
         self.log(f"📊 划分完毕！进入训练集的样本数: {len(self.train_samples)}")
+
+        # ====================================================================
+        # 🌟 GiftEval / LOTSA 同源跨集率审计
+        # ====================================================================
+        def _audit_parent(sample):
+            meta = sample.get('sample_meta', {}) or {}
+            parent = str(meta.get('parent_item_id', '')).strip()
+            if parent:
+                return parent
+            item_id = str(meta.get('item_id', '')).strip()
+            if item_id:
+                return re.sub(r'_dim\d+$', '', item_id)
+            return ""
+
+        train_parent_by_ds = defaultdict(set)
+        test_parent_by_ds = defaultdict(set)
+        for s in self.train_samples:
+            ds = str(s.get('dataset', '')).lower()
+            if ds.startswith('lotsa_') or ds.startswith('ge_'):
+                p = _audit_parent(s)
+                if p:
+                    train_parent_by_ds[ds].add(p)
+
+        for samples in self.test_samples_dict.values():
+            for s in samples:
+                ds = str(s.get('dataset', '')).lower()
+                if ds.startswith('lotsa_') or ds.startswith('ge_'):
+                    p = _audit_parent(s)
+                    if p:
+                        test_parent_by_ds[ds].add(p)
+
+        if train_parent_by_ds or test_parent_by_ds:
+            self.log("🧪 [Leakage Audit] LOTSA/GiftEval 同源跨集率:")
+            for ds in sorted(set(list(train_parent_by_ds.keys()) + list(test_parent_by_ds.keys()))):
+                train_p = train_parent_by_ds.get(ds, set())
+                test_p = test_parent_by_ds.get(ds, set())
+                overlap = len(train_p & test_p)
+                denom = max(len(test_p), 1)
+                overlap_ratio = overlap / denom
+                self.log(f"   - {ds}: overlap={overlap}/{len(test_p)} ({overlap_ratio:.2%})")
         self._scan_and_adapt_lengths()
         if len(self.train_samples) > 0:
             self.log("🏗️ 构建向量数据库...")
