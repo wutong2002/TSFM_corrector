@@ -1,0 +1,20 @@
+# 1. 设置环境变量 (临时)
+$env:PYTHONPATH = "$PWD;$PWD\UniTS-main;$env:PYTHONPATH"
+
+# 2. 运行训练命令 (已添加 --db_source_path)
+python train_corrector.py `
+   --model_family chronos `
+   --model_size bolt-tiny `
+   --context_len 512 `
+   --pred_len 96 `
+   --encoder_type units `
+   --retrieval_scope cross_dataset `
+   --enforce_cross_time_restriction 0 `
+   --corrector_arch attention `
+   --epochs 100 `
+   --corrector_bs 32 `
+   --lr 0.001 `
+   --top_k 5 `
+   --output_root results `
+   --correction_output_dir results/corrector_checkpoints `
+   --db_source_path "results\chronos_bolt_tiny\cl_original\correction_data"

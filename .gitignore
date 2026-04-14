@@ -1,0 +1,25 @@
+# 保留 Python (.py) 和 JSON (.json) 文件
+!*.py
+!*.json
+
+# 忽略 checkpoint 和 datasets 目录中的所有文件，除了 .py 和 .json 文件
+checkpoints/*
+Datasets/*
+correction_datasets_double_res/*
+correction_datasets_double_res_0/*
+Model_Path/*
+moirai-main/*
+results/*
+timesfm-master/*
+UniTS-main/*
+# 但是保留 checkpoint 和 datasets 目录的结构
+!checkpoints/
+!Datasets/
+!correction_datasets_double_res/
+!correction_datasets_double_res_0/
+!Model_Path/
+!moirai-main/
+!results/
+!timesfm-master/
+!UniTS-main/
+# 如果有更多类似的目录，可以按相同方式处理
