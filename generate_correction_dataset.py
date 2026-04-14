@@ -156,10 +156,19 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
             label_entry = entry.copy()
             label_entry['target'] = truth_window
             
+            raw_ch = entry.get("channel_id", -1)
+            try:
+                channel_id = int(raw_ch)
+            except Exception:
+                channel_id = -1
+
             meta = {
                 "tsfm_name": model_name,
                 "dataset_subset": dataset_name,
                 "seq_id": seq_idx,
+                "item_id": str(entry.get("item_id", f"seq_{seq_idx}")),
+                "parent_item_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
+                "channel_id": channel_id,
                 "hist_start": int(t - target_ctx_len),
                 "hist_end": int(t)
             }

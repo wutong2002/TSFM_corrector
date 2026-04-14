@@ -335,6 +335,8 @@ class Dataset:
                             "start": period_start,
                             "target": raw_target[i],
                             "item_id": f"{base_id}_dim{i}",
+                            "parent_item_id": base_id,
+                            "channel_id": i,
                             "freq": target_freq
                         })
                 else:
@@ -342,6 +344,8 @@ class Dataset:
                         "start": period_start,
                         "target": raw_target,
                         "item_id": base_id,
+                        "parent_item_id": base_id,
+                        "channel_id": 0,
                         "freq": target_freq
                     })
             
