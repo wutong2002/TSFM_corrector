@@ -170,7 +170,9 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
                 "parent_item_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
                 "channel_id": channel_id,
                 "hist_start": int(t - target_ctx_len),
-                "hist_end": int(t)
+                "hist_end": int(t),
+                "future_start": int(t),
+                "future_end": int(t + target_pred_len)
             }
             
             input_records.append(input_entry)
@@ -323,6 +325,7 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
         local_preds_aligned = [local_preds_map.get(i, None) for i in range(n_samples)]
 
         timestamps, histories, truths, clean_preds, residuals, local_res_list = [], [], [], [], [], []
+        window_records = []
         saved_sample_metas = [] 
         
         f32_max = np.finfo(np.float32).max * 0.9
@@ -357,7 +360,21 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
             clean_preds.append(p.astype(np.float32))
             residuals.append(res.astype(np.float32))
             local_res_list.append(loc_res.astype(np.float32))
-            saved_sample_metas.append(meta) 
+            saved_sample_metas.append(meta)
+
+            window_records.append({
+                "timestamp": timestamps[-1],
+                "history": histories[-1],
+                "truth": truths[-1],
+                "prediction": clean_preds[-1],
+                "residual": residuals[-1],
+                "local_residual": local_res_list[-1],
+                "sample_metadata": meta,
+                "config": ds_config,
+                "dataset_name": save_name,
+                "freq": ds.freq,
+                "domain": meta_info.get("domain", "Generic")
+            })
 
         if len(histories) == 0:
             print("   ⚠️ 所有数据未通过物理合规性校验，无内容可存。")
@@ -374,7 +391,9 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
             "preds": clean_preds,
             "residuals": np.array(residuals, dtype=object),
             "local_residuals": np.array(local_res_list, dtype=object),
-            "sample_metadata": saved_sample_metas  
+            "sample_metadata": saved_sample_metas,
+            # 细粒度窗口级完整记录（用于误差与行为分析）
+            "window_records": np.array(window_records, dtype=object)
         }
         
         save_dir = os.path.join(CONFIG["OUTPUT_ROOT"], model_id, save_name, str(ds.freq), "short", "correction_data")
