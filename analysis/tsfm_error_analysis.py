@@ -167,7 +167,17 @@ def load_tsfm_window_dataframe(output_root: str, tsfm_name: str) -> pd.DataFrame
             local_res = _safe_array(w.get("local_residual", []))
 
             hfeat = _history_features(history)
-            efeat = _error_features(truth, prediction, residual)
+            precomputed_metrics = w.get("window_metrics", None)
+            if isinstance(precomputed_metrics, dict):
+                efeat = {
+                    "mae": float(precomputed_metrics.get("mae", np.mean(np.abs(residual)))),
+                    "rmse": float(precomputed_metrics.get("rmse", np.sqrt(np.mean(residual ** 2)))),
+                    "max_abs_err": float(precomputed_metrics.get("max_abs_err", np.max(np.abs(residual)))),
+                    "std_abs_err": float(precomputed_metrics.get("std_abs_err", np.std(np.abs(residual)))),
+                    "smape": float(precomputed_metrics.get("smape", _error_features(truth, prediction, residual)["smape"])),
+                }
+            else:
+                efeat = _error_features(truth, prediction, residual)
 
             rows.append({
                 "tsfm": tsfm_name,

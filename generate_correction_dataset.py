@@ -353,22 +353,47 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
                 continue
                 
             ts = forecast.start_date
-            timestamps.append(ts.to_timestamp() if hasattr(ts, 'to_timestamp') else ts)
-            
-            histories.append(hist.astype(np.float32))
-            truths.append(gt.astype(np.float32))
-            clean_preds.append(p.astype(np.float32))
-            residuals.append(res.astype(np.float32))
-            local_res_list.append(loc_res.astype(np.float32))
+            ts_val = ts.to_timestamp() if hasattr(ts, 'to_timestamp') else ts
+
+            # 历史片段 = 原始滑窗截取出的完整历史窗口（用于后续做画像/特征提取）
+            hist_f32 = hist.astype(np.float32)
+            # 未来真值片段 = 原始滑窗截取出的完整 future 窗口
+            gt_f32 = gt.astype(np.float32)
+            # 预测片段 = TSFM 对该窗口未来长度的完整输出
+            pred_f32 = p.astype(np.float32)
+            # 未来残差片段 = truth - pred（完整逐点）
+            res_f32 = res.astype(np.float32)
+            # 局部残差片段 = 自验证任务得到的历史局部误差指纹（完整逐点）
+            loc_res_f32 = loc_res.astype(np.float32)
+
+            timestamps.append(ts_val)
+            histories.append(hist_f32)
+            truths.append(gt_f32)
+            clean_preds.append(pred_f32)
+            residuals.append(res_f32)
+            local_res_list.append(loc_res_f32)
             saved_sample_metas.append(meta)
 
+            # 逐窗口详细记录：
+            # - history/truth/prediction/residual/local_residual 全为“完整片段”，不是统计值
+            # - 同时附带该窗口可直接复算的常见误差指标，便于后续快速分桶
+            denom = np.abs(gt_f32) + np.abs(pred_f32)
+            valid_mask = denom > 1e-8
+            smape = np.mean(np.where(valid_mask, 200.0 * np.abs(res_f32) / denom, 0.0))
             window_records.append({
-                "timestamp": timestamps[-1],
-                "history": histories[-1],
-                "truth": truths[-1],
-                "prediction": clean_preds[-1],
-                "residual": residuals[-1],
-                "local_residual": local_res_list[-1],
+                "timestamp": ts_val,
+                "history": hist_f32,
+                "truth": gt_f32,
+                "prediction": pred_f32,
+                "residual": res_f32,
+                "local_residual": loc_res_f32,
+                "window_metrics": {
+                    "mae": float(np.mean(np.abs(res_f32))),
+                    "rmse": float(np.sqrt(np.mean(res_f32 ** 2))),
+                    "max_abs_err": float(np.max(np.abs(res_f32))),
+                    "std_abs_err": float(np.std(np.abs(res_f32))),
+                    "smape": float(smape),
+                },
                 "sample_metadata": meta,
                 "config": ds_config,
                 "dataset_name": save_name,
@@ -393,6 +418,12 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
             "local_residuals": np.array(local_res_list, dtype=object),
             "sample_metadata": saved_sample_metas,
             # 细粒度窗口级完整记录（用于误差与行为分析）
+            # 每个元素 schema:
+            # {
+            #   timestamp, history, truth, prediction, residual, local_residual,
+            #   window_metrics(mae/rmse/max_abs_err/std_abs_err/smape),
+            #   sample_metadata, config, dataset_name, freq, domain
+            # }
             "window_records": np.array(window_records, dtype=object)
         }
         
