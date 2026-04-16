@@ -102,6 +102,13 @@ def main():
     parser.add_argument("--data_root", type=str, required=True)
     parser.add_argument("--output_root", type=str, required=True)
     parser.add_argument("--seed", type=int, default=2025)
+    parser.add_argument(
+        "--v2_last_sequence_only",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="是否启用V2防泄露：每个 parent/source 序列只保留最后(或目标)一条子序列",
+    )
     
     # [关键修复 1] 添加 Beta 参数
     parser.add_argument("--retrieval_alpha", type=float, default=1.0, help="Weight for Sequence Similarity")
@@ -147,6 +154,7 @@ def main():
     for idx, params in enumerate(param_combinations):
         current_train_cfg = BASE_CONFIG.copy()
         current_train_cfg['seed'] = args.seed
+        current_train_cfg['v2_last_sequence_only'] = bool(args.v2_last_sequence_only)
         
         # [关键修复 2] 将 Alpha 和 Beta 写入配置
         current_train_cfg['retrieval_alpha'] = args.retrieval_alpha 
@@ -174,10 +182,14 @@ def main():
         logger.info(f"👉 [Run {idx+1}/{len(param_combinations)}] ID: {exp_name}")
         logger.info(f"📋 Params: {params}")
         logger.info(f"🛠️ Alpha: {current_train_cfg['retrieval_alpha']} | Beta: {current_train_cfg['retrieval_beta']}")
+        logger.info(f"🔒 V2 Last Sequence Only: {current_train_cfg['v2_last_sequence_only']}")
         
         # [关键修复 4] 更新缓存敏感键，加入 retrieval_beta
         # 这一步至关重要：如果 beta 变了，必须重新构建 Dataset，不能复用 Cache
-        ds_sensitive_keys = ['top_k', 'diversity_max_per_dataset', 'pseudo_ratio', 'retrieval_alpha', 'retrieval_beta']
+        ds_sensitive_keys = [
+            'top_k', 'diversity_max_per_dataset', 'pseudo_ratio',
+            'retrieval_alpha', 'retrieval_beta', 'v2_last_sequence_only'
+        ]
         current_ds_signature = {k: current_train_cfg.get(k) for k in ds_sensitive_keys}
         
         preloaded_data = None

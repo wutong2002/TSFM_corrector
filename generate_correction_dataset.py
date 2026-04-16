@@ -38,6 +38,11 @@ CONFIG = {
 
     # 🌟 [新增功能] 数据集前缀白名单 (例如 ["QB_"] 只跑QuitoBench)。留空 [] 则不限制，跑所有扫描到的数据。
     "TARGET_DATASET_PREFIXES": ["QB_"], 
+    
+    # 🌟 V2 防泄露机制：
+    # True 时，按 source sequence(parent_item_id) 分组，每组只保留“最后一条序列/目标序列”
+    # 用于彻底避免多通道/同源派生序列带来的规律泄露。
+    "V2_LAST_SEQUENCE_ONLY": False,
 
     # 🌟 自由长度控制机制 🌟
     "USE_NEW_MECHANISM": False,                    
@@ -125,7 +130,48 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
     
     default_stride = CONFIG["STRIDE"]
     
-    for seq_idx, entry in enumerate(dataset_obj.gluonts_dataset):
+    entries = list(dataset_obj.gluonts_dataset)
+
+    # =====================================================================
+    # [V2 防泄露开关] 按 source sequence 仅保留最后一个序列（优先目标序列）
+    # =====================================================================
+    if CONFIG.get("V2_LAST_SEQUENCE_ONLY", False):
+        grouped = {}
+        for raw_idx, entry in enumerate(entries):
+            source_seq_id = str(entry.get("parent_item_id", entry.get("item_id", f"seq_{raw_idx}")))
+            grouped.setdefault(source_seq_id, []).append((raw_idx, entry))
+
+        filtered_entries = []
+        for source_seq_id, candidates in grouped.items():
+            # 1) 优先明确标记为目标序列的样本（若有）
+            target_candidates = []
+            for raw_idx, cand in candidates:
+                is_target = cand.get("is_target", cand.get("target_flag", False))
+                if bool(is_target):
+                    target_candidates.append((raw_idx, cand))
+
+            pool = target_candidates if len(target_candidates) > 0 else candidates
+
+            # 2) 若无目标标记，则按“最后一条”的语义选择：
+            #    - 优先 channel_id 更大的
+            #    - 再按原始遍历顺序(raw_idx)更靠后
+            def sort_key(x):
+                ridx, ent = x
+                raw_ch = ent.get("channel_id", -1)
+                try:
+                    ch = int(raw_ch)
+                except Exception:
+                    ch = -1
+                return (ch, ridx)
+
+            _, chosen = sorted(pool, key=sort_key)[-1]
+            filtered_entries.append(chosen)
+
+        before_n = len(entries)
+        entries = filtered_entries
+        print(f"   🔒 [V2防泄露] source-seq去重: {before_n} -> {len(entries)} (每个source_seq仅保留最后/目标序列)")
+
+    for seq_idx, entry in enumerate(entries):
         full_seq = entry['target'] 
         seq_len = len(full_seq)
         
@@ -169,8 +215,12 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
                 "item_id": str(entry.get("item_id", f"seq_{seq_idx}")),
                 "parent_item_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
                 "channel_id": channel_id,
+                "source_seq_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
+                "v2_last_sequence_only": bool(CONFIG.get("V2_LAST_SEQUENCE_ONLY", False)),
                 "hist_start": int(t - target_ctx_len),
-                "hist_end": int(t)
+                "hist_end": int(t),
+                "future_start": int(t),
+                "future_end": int(t + target_pred_len)
             }
             
             input_records.append(input_entry)
@@ -323,6 +373,7 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
         local_preds_aligned = [local_preds_map.get(i, None) for i in range(n_samples)]
 
         timestamps, histories, truths, clean_preds, residuals, local_res_list = [], [], [], [], [], []
+        window_records = []
         saved_sample_metas = [] 
         
         f32_max = np.finfo(np.float32).max * 0.9
@@ -350,14 +401,53 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
                 continue
                 
             ts = forecast.start_date
-            timestamps.append(ts.to_timestamp() if hasattr(ts, 'to_timestamp') else ts)
-            
-            histories.append(hist.astype(np.float32))
-            truths.append(gt.astype(np.float32))
-            clean_preds.append(p.astype(np.float32))
-            residuals.append(res.astype(np.float32))
-            local_res_list.append(loc_res.astype(np.float32))
-            saved_sample_metas.append(meta) 
+            ts_val = ts.to_timestamp() if hasattr(ts, 'to_timestamp') else ts
+
+            # 历史片段 = 原始滑窗截取出的完整历史窗口（用于后续做画像/特征提取）
+            hist_f32 = hist.astype(np.float32)
+            # 未来真值片段 = 原始滑窗截取出的完整 future 窗口
+            gt_f32 = gt.astype(np.float32)
+            # 预测片段 = TSFM 对该窗口未来长度的完整输出
+            pred_f32 = p.astype(np.float32)
+            # 未来残差片段 = truth - pred（完整逐点）
+            res_f32 = res.astype(np.float32)
+            # 局部残差片段 = 自验证任务得到的历史局部误差指纹（完整逐点）
+            loc_res_f32 = loc_res.astype(np.float32)
+
+            timestamps.append(ts_val)
+            histories.append(hist_f32)
+            truths.append(gt_f32)
+            clean_preds.append(pred_f32)
+            residuals.append(res_f32)
+            local_res_list.append(loc_res_f32)
+            saved_sample_metas.append(meta)
+
+            # 逐窗口详细记录：
+            # - history/truth/prediction/residual/local_residual 全为“完整片段”，不是统计值
+            # - 同时附带该窗口可直接复算的常见误差指标，便于后续快速分桶
+            denom = np.abs(gt_f32) + np.abs(pred_f32)
+            valid_mask = denom > 1e-8
+            smape = np.mean(np.where(valid_mask, 200.0 * np.abs(res_f32) / denom, 0.0))
+            window_records.append({
+                "timestamp": ts_val,
+                "history": hist_f32,
+                "truth": gt_f32,
+                "prediction": pred_f32,
+                "residual": res_f32,
+                "local_residual": loc_res_f32,
+                "window_metrics": {
+                    "mae": float(np.mean(np.abs(res_f32))),
+                    "rmse": float(np.sqrt(np.mean(res_f32 ** 2))),
+                    "max_abs_err": float(np.max(np.abs(res_f32))),
+                    "std_abs_err": float(np.std(np.abs(res_f32))),
+                    "smape": float(smape),
+                },
+                "sample_metadata": meta,
+                "config": ds_config,
+                "dataset_name": save_name,
+                "freq": ds.freq,
+                "domain": meta_info.get("domain", "Generic")
+            })
 
         if len(histories) == 0:
             print("   ⚠️ 所有数据未通过物理合规性校验，无内容可存。")
@@ -374,7 +464,15 @@ def process_dataset_with_model(model_instance, raw_dataset_path, dataset_propert
             "preds": clean_preds,
             "residuals": np.array(residuals, dtype=object),
             "local_residuals": np.array(local_res_list, dtype=object),
-            "sample_metadata": saved_sample_metas  
+            "sample_metadata": saved_sample_metas,
+            # 细粒度窗口级完整记录（用于误差与行为分析）
+            # 每个元素 schema:
+            # {
+            #   timestamp, history, truth, prediction, residual, local_residual,
+            #   window_metrics(mae/rmse/max_abs_err/std_abs_err/smape),
+            #   sample_metadata, config, dataset_name, freq, domain
+            # }
+            "window_records": np.array(window_records, dtype=object)
         }
         
         save_dir = os.path.join(CONFIG["OUTPUT_ROOT"], model_id, save_name, str(ds.freq), "short", "correction_data")
