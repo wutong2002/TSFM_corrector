@@ -38,6 +38,11 @@ CONFIG = {
 
     # 🌟 [新增功能] 数据集前缀白名单 (例如 ["QB_"] 只跑QuitoBench)。留空 [] 则不限制，跑所有扫描到的数据。
     "TARGET_DATASET_PREFIXES": ["QB_"], 
+    
+    # 🌟 V2 防泄露机制：
+    # True 时，按 source sequence(parent_item_id) 分组，每组只保留“最后一条序列/目标序列”
+    # 用于彻底避免多通道/同源派生序列带来的规律泄露。
+    "V2_LAST_SEQUENCE_ONLY": False,
 
     # 🌟 自由长度控制机制 🌟
     "USE_NEW_MECHANISM": False,                    
@@ -125,7 +130,48 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
     
     default_stride = CONFIG["STRIDE"]
     
-    for seq_idx, entry in enumerate(dataset_obj.gluonts_dataset):
+    entries = list(dataset_obj.gluonts_dataset)
+
+    # =====================================================================
+    # [V2 防泄露开关] 按 source sequence 仅保留最后一个序列（优先目标序列）
+    # =====================================================================
+    if CONFIG.get("V2_LAST_SEQUENCE_ONLY", False):
+        grouped = {}
+        for raw_idx, entry in enumerate(entries):
+            source_seq_id = str(entry.get("parent_item_id", entry.get("item_id", f"seq_{raw_idx}")))
+            grouped.setdefault(source_seq_id, []).append((raw_idx, entry))
+
+        filtered_entries = []
+        for source_seq_id, candidates in grouped.items():
+            # 1) 优先明确标记为目标序列的样本（若有）
+            target_candidates = []
+            for raw_idx, cand in candidates:
+                is_target = cand.get("is_target", cand.get("target_flag", False))
+                if bool(is_target):
+                    target_candidates.append((raw_idx, cand))
+
+            pool = target_candidates if len(target_candidates) > 0 else candidates
+
+            # 2) 若无目标标记，则按“最后一条”的语义选择：
+            #    - 优先 channel_id 更大的
+            #    - 再按原始遍历顺序(raw_idx)更靠后
+            def sort_key(x):
+                ridx, ent = x
+                raw_ch = ent.get("channel_id", -1)
+                try:
+                    ch = int(raw_ch)
+                except Exception:
+                    ch = -1
+                return (ch, ridx)
+
+            _, chosen = sorted(pool, key=sort_key)[-1]
+            filtered_entries.append(chosen)
+
+        before_n = len(entries)
+        entries = filtered_entries
+        print(f"   🔒 [V2防泄露] source-seq去重: {before_n} -> {len(entries)} (每个source_seq仅保留最后/目标序列)")
+
+    for seq_idx, entry in enumerate(entries):
         full_seq = entry['target'] 
         seq_len = len(full_seq)
         
@@ -169,6 +215,8 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
                 "item_id": str(entry.get("item_id", f"seq_{seq_idx}")),
                 "parent_item_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
                 "channel_id": channel_id,
+                "source_seq_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
+                "v2_last_sequence_only": bool(CONFIG.get("V2_LAST_SEQUENCE_ONLY", False)),
                 "hist_start": int(t - target_ctx_len),
                 "hist_end": int(t),
                 "future_start": int(t),
