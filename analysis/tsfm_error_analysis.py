@@ -223,7 +223,25 @@ def load_tsfm_window_dataframe(output_root: str, tsfm_name: str) -> pd.DataFrame
 def add_quantile_buckets(df: pd.DataFrame, feature_cols: Sequence[str], n_bins: int = 5) -> pd.DataFrame:
     out = df.copy()
     for c in feature_cols:
-        out[f"{c}_bucket"] = pd.qcut(out[c], q=n_bins, duplicates="drop")
+        s = pd.to_numeric(out[c], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        valid = s.dropna()
+        bucket_col = f"{c}_bucket"
+        out[bucket_col] = pd.Series([np.nan] * len(out), index=out.index, dtype=object)
+        if valid.empty:
+            continue
+
+        n_eff = max(1, min(int(n_bins), int(valid.nunique())))
+        if n_eff < 2:
+            # 唯一值过少时，退化为单桶，保持流程不断
+            out.loc[valid.index, bucket_col] = "single_bucket"
+            continue
+
+        try:
+            out.loc[valid.index, bucket_col] = pd.qcut(valid, q=n_eff, duplicates="drop").astype(str)
+        except ValueError:
+            # 遇到边界重复/缺失导致的 qcut 问题时，使用 rank 后再 qcut 的稳健回退
+            ranked = valid.rank(method="first")
+            out.loc[valid.index, bucket_col] = pd.qcut(ranked, q=n_eff, duplicates="drop").astype(str)
     return out
 
 
@@ -268,7 +286,30 @@ def build_error_interval_feature_stats(
     n_error_bins: int = 6,
 ) -> pd.DataFrame:
     out = df.copy()
-    out["error_bucket"] = pd.qcut(out[error_metric], q=n_error_bins, duplicates="drop")
+    s = pd.to_numeric(out[error_metric], errors="coerce").replace([np.inf, -np.inf], np.nan)
+    valid = s.dropna()
+    out["error_bucket"] = pd.Series([np.nan] * len(out), index=out.index, dtype=object)
+
+    if valid.empty:
+        cols = ["error_bucket"] + [f"{c}_{stat}" for c in feature_cols for stat in ["mean", "max", "std"]]
+        return pd.DataFrame(columns=cols)
+
+    n_eff = max(1, min(int(n_error_bins), int(valid.nunique())))
+    if n_eff < 2:
+        out.loc[valid.index, "error_bucket"] = "single_bucket"
+    else:
+        try:
+            out.loc[valid.index, "error_bucket"] = pd.qcut(valid, q=n_eff, duplicates="drop").astype(str)
+        except ValueError:
+            # 稳健回退：先做严格排名，再做分位分桶，避免区间边界缺失错位
+            ranked = valid.rank(method="first")
+            out.loc[valid.index, "error_bucket"] = pd.qcut(ranked, q=n_eff, duplicates="drop").astype(str)
+
+    out = out.dropna(subset=["error_bucket"])
+    if out.empty:
+        cols = ["error_bucket"] + [f"{c}_{stat}" for c in feature_cols for stat in ["mean", "max", "std"]]
+        return pd.DataFrame(columns=cols)
+
     agg_dict = {}
     for c in feature_cols:
         agg_dict[c] = ["mean", "max", "std"]
