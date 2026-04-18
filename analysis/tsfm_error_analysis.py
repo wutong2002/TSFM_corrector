@@ -9,6 +9,13 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+try:
+    from utils.missing import fill_missing
+except ImportError:
+    import sys
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from utils.missing import fill_missing
+
 
 @dataclass
 class WindowRecord:
@@ -27,6 +34,21 @@ class WindowRecord:
 
 def _safe_array(x: Sequence[float]) -> np.ndarray:
     return np.asarray(x, dtype=np.float64).reshape(-1)
+
+def _impute_series_experiment_aligned(arr: Sequence[float]) -> np.ndarray:
+    """
+    与 corrector.trainer.CorrectionTrainer._impute_series 对齐：
+    - 转为 1D float32
+    - 若存在 NaN，使用 fill_missing(..., all_nan_strategy_1d='zero', interp_kind_1d='linear')
+    """
+    if arr is None:
+        return np.asarray([], dtype=np.float32)
+    x = np.asarray(arr, dtype=np.float32).reshape(-1)
+    if len(x) == 0:
+        return x
+    if np.isnan(x).any():
+        return fill_missing(x, all_nan_strategy_1d="zero", interp_kind_1d="linear")
+    return x
 
 
 def list_tsfms(output_root: str) -> List[str]:
@@ -160,11 +182,12 @@ def load_tsfm_window_dataframe(output_root: str, tsfm_name: str) -> pd.DataFrame
                 })
 
         for w in windows:
-            history = _safe_array(w["history"])
-            truth = _safe_array(w["truth"])
-            prediction = _safe_array(w["prediction"])
-            residual = _safe_array(w["residual"])
-            local_res = _safe_array(w.get("local_residual", []))
+            # 与 correction 训练实验一致：先执行缺失值预处理，再进入特征/误差计算
+            history = _impute_series_experiment_aligned(w["history"]).astype(np.float64)
+            truth = _impute_series_experiment_aligned(w["truth"]).astype(np.float64)
+            prediction = _impute_series_experiment_aligned(w["prediction"]).astype(np.float64)
+            residual = _impute_series_experiment_aligned(w["residual"]).astype(np.float64)
+            local_res = _impute_series_experiment_aligned(w.get("local_residual", [])).astype(np.float64)
 
             hfeat = _history_features(history)
             precomputed_metrics = w.get("window_metrics", None)
