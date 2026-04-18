@@ -10,6 +10,9 @@ DATA_ROOT="correction_datasets_double_res_0"
 # 2. 结果保存路径
 OUTPUT_ROOT="results/dual_source_experiment_0331_V2"
 
+# 2.1 V2 防泄露开关：1=每个 parent/source 仅保留最后(或目标)一条序列；0=关闭
+V2_LAST_SEQUENCE_ONLY=1
+
 # 3. 指定目标基础模型 (Target TSFM) "kairos_10m" "tirex_base" "moirai_small" "tirex_base" "timesfm_2.5" "kairos_10m"
 # 可以根据你的显卡资源增减"chronos_bolt_tiny"   "moirai_small"    "moirai_small" "kairos_10m" "timesfm_2.5"   "tirex_base" "moirai_small"  "timesfm_2.5" "moirai_small"
 TARGET_TSFMS=("chronos_bolt_tiny" "timesfm_2.5"  "moirai_small" "tirex_base" "kairos_10m" )
@@ -49,7 +52,8 @@ for TARGET_TSFM in "${TARGET_TSFMS[@]}"; do
                 --grid_mode "$GRID_MODE" \
                 --data_root "$DATA_ROOT" \
                 --output_root "$OUTPUT_ROOT" \
-                --seed 2025
+                --seed 2025 \
+                --v2_last_sequence_only "$V2_LAST_SEQUENCE_ONLY"
                 
             if [ $? -ne 0 ]; then
                 echo "❌ 任务失败: $enc + $corr"
