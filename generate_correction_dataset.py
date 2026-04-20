@@ -5,7 +5,6 @@ import numpy as np
 import importlib
 import torch
 import glob
-import re
 from types import SimpleNamespace
 from tqdm import tqdm
 from pathlib import Path
@@ -212,12 +211,9 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
             meta = {
                 "tsfm_name": model_name,
                 "dataset_subset": dataset_name,
-                "dataset_base_name": ds_base_name,
-                "dataset_channel_suffix": int(ds_channel_suffix),
                 "seq_id": seq_idx,
                 "item_id": str(entry.get("item_id", f"seq_{seq_idx}")),
                 "parent_item_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
-                "parent_seq_id": _build_parent_seq_id(entry, seq_idx),
                 "channel_id": channel_id,
                 "source_seq_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
                 "v2_last_sequence_only": bool(CONFIG.get("V2_LAST_SEQUENCE_ONLY", False)),
