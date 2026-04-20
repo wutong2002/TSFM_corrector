@@ -329,6 +329,7 @@ class CorrectionTrainer:
         max_train = self.train_config.get('max_samples_per_dataset', -1)
         max_test = self.train_config.get('max_test_samples_per_dataset', -1)
         split_mode = self.train_config.get('train_test_split_mode', 'cross_dataset')
+        v2_last_seq_only = bool(self.train_config.get('v2_last_sequence_only', 0))
         
         # 构建大池子
         train_targets = [t.lower() for t in raw_train_list]
@@ -341,6 +342,8 @@ class CorrectionTrainer:
         stats = defaultdict(int)
         
         self.log(f"🔍 模式 [{split_mode.upper()}] 正在加载数据...")
+        if v2_last_seq_only:
+            self.log("🔒 [V2防泄露] 实验层启用：每个 source_seq_id 仅保留最后/目标序列")
         
         # 1. 把相关的数据全部载入内存大池子
         loaded_items_by_ds = defaultdict(list)
@@ -378,10 +381,93 @@ class CorrectionTrainer:
                 smape_quantiles = data.get('smape_quantiles', [])
                 file_metadata = data.get('metadata', {}) 
                 sample_metadata = data.get('sample_metadata', [])
+
+                # ============================================================
+                # [V2 防泄露 | 实验层生效]
+                # 在 run_dual_source.sh 控制的训练实验中，按 source_seq 只保留最后/目标序列。
+                # ============================================================
+                allowed_item_ids = None
+                if v2_last_seq_only and len(sample_metadata) > 0:
+                    # 先按 source(parent) 分组，再在每组内按“序列级”信息去重，避免窗口级抖动影响选择。
+                    grouped = defaultdict(list)
+                    for meta in sample_metadata:
+                        if not isinstance(meta, dict):
+                            continue
+                        src = str(meta.get('source_seq_id', meta.get('parent_item_id', meta.get('item_id', 'unknown'))))
+                        grouped[src].append(meta)
+
+                    allowed_item_ids = set()
+                    for _, metas in grouped.items():
+                        # sequence_candidates[item_id] = 聚合后的序列级画像
+                        sequence_candidates = {}
+                        for m in metas:
+                            item_id = str(m.get('item_id', '')).strip()
+                            if not item_id:
+                                continue
+
+                            if item_id not in sequence_candidates:
+                                sequence_candidates[item_id] = {
+                                    "item_id": item_id,
+                                    "is_target": False,
+                                    "channel_id_max": -1,
+                                    "seq_id_max": -1,
+                                    "hist_end_max": -1,
+                                }
+
+                            cand = sequence_candidates[item_id]
+                            cand["is_target"] = cand["is_target"] or bool(m.get('is_target', m.get('target_flag', False)))
+
+                            try:
+                                cand["channel_id_max"] = max(cand["channel_id_max"], int(m.get('channel_id', -1)))
+                            except Exception:
+                                pass
+                            try:
+                                cand["seq_id_max"] = max(cand["seq_id_max"], int(m.get('seq_id', -1)))
+                            except Exception:
+                                pass
+                            try:
+                                cand["hist_end_max"] = max(cand["hist_end_max"], int(m.get('hist_end', -1)))
+                            except Exception:
+                                pass
+
+                        candidates = list(sequence_candidates.values())
+                        if not candidates:
+                            continue
+
+                        target_candidates = [c for c in candidates if c["is_target"]]
+                        pool = target_candidates if target_candidates else candidates
+
+                        # “最后一条”优先级：
+                        # 1) channel_id 更大
+                        # 2) seq_id 更大
+                        # 3) hist_end 更大（兜底）
+                        # 4) item_id 字典序（稳定排序）
+                        chosen = sorted(
+                            pool,
+                            key=lambda c: (c["channel_id_max"], c["seq_id_max"], c["hist_end_max"], c["item_id"])
+                        )[-1]
+                        allowed_item_ids.add(chosen["item_id"])
+
+                    raw_item_ids = {
+                        str(m.get('item_id', '')).strip()
+                        for m in sample_metadata
+                        if isinstance(m, dict) and str(m.get('item_id', '')).strip()
+                    }
+                    self.data_filter_stats["V2原始序列数(item_id)"] += len(raw_item_ids)
+                    self.data_filter_stats["V2保留序列数(item_id)"] += len(allowed_item_ids)
                 
                 count = min(len(histories), len(residuals))
                 for i in range(count):
                     total_raw += 1 # 累加读取总数
+                    meta = sample_metadata[i] if i < len(sample_metadata) else {}
+
+                    # [V2防泄露] 非保留序列直接跳过
+                    if allowed_item_ids is not None:
+                        cur_item_id = str(meta.get('item_id', ''))
+                        if cur_item_id not in allowed_item_ids:
+                            self.data_filter_stats["V2防泄露过滤(非最后/目标序列)"] += 1
+                            continue
+
                     raw_l_r = local_residuals[i] if local_residuals is not None and i < len(local_residuals) else None
                     
                     # 🚨 规则 A: 拦截空值与过短序列
@@ -423,8 +509,6 @@ class CorrectionTrainer:
                     
                     scaled_r_clamped = np.clip(r / scale, -20.0, 20.0) 
                     clamped_raw_r = scaled_r_clamped * scale
-                    meta = sample_metadata[i] if i < len(sample_metadata) else {}
-                    
                     item = {
                         'history': h, 'history_norm': h / scale,
                         'residual': clamped_raw_r, 'scaled_residual': scaled_r_clamped,
@@ -438,6 +522,92 @@ class CorrectionTrainer:
                         'sample_meta': meta
                     }
                     loaded_items_by_ds[clean_name].append((tsfm, item))
+
+        # ====================================================================
+        # [V2 防泄露 | 全局二次去重]
+        # 解决“多通道已拆分到不同子集目录”场景：
+        # 需要跨 dataset_subset 统一按 parent_seq_id/source_seq_id 只保留最后/目标序列。
+        # ====================================================================
+        if v2_last_seq_only:
+            chosen_item_id_by_parent = {}
+            candidates_by_parent = defaultdict(dict)  # parent_key -> item_id -> aggregated meta
+
+            def _parent_key_from_meta(meta):
+                if not isinstance(meta, dict):
+                    return ""
+                parent = str(meta.get("parent_seq_id", meta.get("source_seq_id", meta.get("parent_item_id", "")))).strip()
+                if parent:
+                    return parent
+                item_id = str(meta.get("item_id", "")).strip()
+                if item_id:
+                    return re.sub(r'_dim\\d+$', '', item_id)
+                return ""
+
+            for _, items_list in loaded_items_by_ds.items():
+                for _, item in items_list:
+                    meta = item.get('sample_meta', {}) or {}
+                    parent_key = _parent_key_from_meta(meta)
+                    item_id = str(meta.get('item_id', '')).strip()
+                    if not parent_key or not item_id:
+                        continue
+
+                    item_cand = candidates_by_parent[parent_key].setdefault(item_id, {
+                        "item_id": item_id,
+                        "is_target": False,
+                        "channel_id_max": -1,
+                        "dataset_ch_max": -1,
+                        "seq_id_max": -1,
+                        "hist_end_max": -1,
+                    })
+                    item_cand["is_target"] = item_cand["is_target"] or bool(meta.get('is_target', meta.get('target_flag', False)))
+                    try:
+                        item_cand["channel_id_max"] = max(item_cand["channel_id_max"], int(meta.get('channel_id', -1)))
+                    except Exception:
+                        pass
+                    try:
+                        item_cand["dataset_ch_max"] = max(item_cand["dataset_ch_max"], int(meta.get('dataset_channel_suffix', -1)))
+                    except Exception:
+                        pass
+                    try:
+                        item_cand["seq_id_max"] = max(item_cand["seq_id_max"], int(meta.get('seq_id', -1)))
+                    except Exception:
+                        pass
+                    try:
+                        item_cand["hist_end_max"] = max(item_cand["hist_end_max"], int(meta.get('hist_end', -1)))
+                    except Exception:
+                        pass
+
+            for parent_key, item_dict in candidates_by_parent.items():
+                candidates = list(item_dict.values())
+                if not candidates:
+                    continue
+                target_candidates = [c for c in candidates if c["is_target"]]
+                pool = target_candidates if target_candidates else candidates
+                chosen = sorted(
+                    pool,
+                    key=lambda c: (c["channel_id_max"], c["dataset_ch_max"], c["seq_id_max"], c["hist_end_max"], c["item_id"])
+                )[-1]
+                chosen_item_id_by_parent[parent_key] = chosen["item_id"]
+
+            if chosen_item_id_by_parent:
+                before_total = sum(len(v) for v in loaded_items_by_ds.values())
+                filtered_loaded_items_by_ds = defaultdict(list)
+                dropped = 0
+                for ds_name, items_list in loaded_items_by_ds.items():
+                    for tsfm, item in items_list:
+                        meta = item.get('sample_meta', {}) or {}
+                        parent_key = _parent_key_from_meta(meta)
+                        cur_item_id = str(meta.get('item_id', '')).strip()
+                        if parent_key and cur_item_id:
+                            chosen_item = chosen_item_id_by_parent.get(parent_key, cur_item_id)
+                            if cur_item_id != chosen_item:
+                                dropped += 1
+                                self.data_filter_stats["V2全局去重过滤(跨子集多余通道)"] += 1
+                                continue
+                        filtered_loaded_items_by_ds[ds_name].append((tsfm, item))
+                loaded_items_by_ds = filtered_loaded_items_by_ds
+                after_total = sum(len(v) for v in loaded_items_by_ds.values())
+                self.log(f"🔒 [V2防泄露] 全局跨子集去重: {before_total} -> {after_total} (dropped={dropped})")
                     
         # ====================================================================
         # 🌟🌟🌟 [核心修复] 动态计算样本难度分位数 (sMAPE Quantiles) 🌟🌟🌟
