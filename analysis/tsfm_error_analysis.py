@@ -264,10 +264,10 @@ def plot_feature_pair_heatmaps(
     figsize: Tuple[int, int] = (20, 5),
 ):
     fig, axes = plt.subplots(1, 3, figsize=figsize)
-    for ax, metric, title in zip(axes, ["mean", "max", "std"], ["均值", "最大值", "标准差"]):
+    for ax, metric, title in zip(axes, ["mean", "max", "std"], ["Mean", "Max", "Std"]):
         pivot = stats_df.pivot_table(index=y_bucket_col, columns=x_bucket_col, values=metric, aggfunc="mean")
         im = ax.imshow(pivot.values, aspect="auto")
-        ax.set_title(f"误差{title}")
+        ax.set_title(f"Error {title}")
         ax.set_xlabel(x_bucket_col)
         ax.set_ylabel(y_bucket_col)
         ax.set_xticks(range(len(pivot.columns)))
@@ -335,7 +335,7 @@ def plot_error_bucket_feature_heatmap(
     ax.set_yticklabels(feature_cols)
     ax.set_xticks(range(len(stats_df)))
     ax.set_xticklabels([str(x) for x in stats_df["error_bucket"]], rotation=45, ha="right")
-    ax.set_title(f"误差桶内特征 {stat}")
+    ax.set_title(f"Feature {stat} in Error Buckets")
     ax.set_xlabel("error_bucket")
     ax.set_ylabel("feature")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
