@@ -137,6 +137,7 @@ BASE_CONFIG = {
     "err_sim_metric": "cosine",      # 默认使用余弦相似度检索误差指纹
     "allow_data_leakage": 1,     # 数据泄漏
     "group_by_parent_item_id": 1,  # 按原始母序列分组切分，避免多通道同源泄漏
+    "v2_last_sequence_only": 1,  # 运行实验时按 source(parent) 仅保留最后/目标序列
     "train_test_split_mode":"seq_per_dataset" ,#"cross_dataset(默认, 子集完全隔离); ""seq_per_dataset(同子集但序列隔离); ""temporal_per_seq(同序列但时间隔离)"
     "retrieval_scope":"exclude_seq" ,#"allow_self(允许查到目标本身); ""exclude_self(禁止查到目标本身); ""exclude_seq(禁止查到目标所在序列的任何窗口); ""cross_dataset(禁止查到目标所在子集)"
     # "gating_strategy": "none", 
