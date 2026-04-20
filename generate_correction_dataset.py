@@ -133,31 +133,13 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
     
     entries = list(dataset_obj.gluonts_dataset)
 
-    # 规范化“子集名/母序列名”：
-    # 例如 GE_bitbrains_fast_storage_5T_1 / GE_bitbrains_fast_storage_5T_2
-    # 统一映射到同一母子集 GE_bitbrains_fast_storage_5T
-    ds_base_name = re.sub(r"_(\\d+)$", "", str(dataset_name))
-    ds_channel_suffix_match = re.search(r"_(\\d+)$", str(dataset_name))
-    ds_channel_suffix = int(ds_channel_suffix_match.group(1)) if ds_channel_suffix_match else -1
-
-    def _normalize_parent_item_id(x):
-        s = str(x)
-        s = re.sub(r"_dim\\d+$", "", s)
-        s = re.sub(r"_(\\d+)$", "", s)
-        return s
-
-    def _build_parent_seq_id(entry, fallback_seq_idx):
-        raw_parent = entry.get("parent_item_id", entry.get("item_id", f"seq_{fallback_seq_idx}"))
-        normalized_parent = _normalize_parent_item_id(raw_parent)
-        return f"{ds_base_name}::{normalized_parent}"
-
     # =====================================================================
     # [V2 防泄露开关] 按 source sequence 仅保留最后一个序列（优先目标序列）
     # =====================================================================
     if CONFIG.get("V2_LAST_SEQUENCE_ONLY", False):
         grouped = {}
         for raw_idx, entry in enumerate(entries):
-            source_seq_id = _build_parent_seq_id(entry, raw_idx)
+            source_seq_id = str(entry.get("parent_item_id", entry.get("item_id", f"seq_{raw_idx}")))
             grouped.setdefault(source_seq_id, []).append((raw_idx, entry))
 
         filtered_entries = []
@@ -181,8 +163,7 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
                     ch = int(raw_ch)
                 except Exception:
                     ch = -1
-                # 若 channel_id 不可靠（拆分子集下常为 0），使用子集后缀编号辅助排序
-                return (ch, ds_channel_suffix, ridx)
+                return (ch, ridx)
 
             _, chosen = sorted(pool, key=sort_key)[-1]
             filtered_entries.append(chosen)
@@ -238,7 +219,7 @@ def generate_sliding_windows(dataset_obj, target_ctx_len, target_pred_len, datas
                 "parent_item_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
                 "parent_seq_id": _build_parent_seq_id(entry, seq_idx),
                 "channel_id": channel_id,
-                "source_seq_id": _build_parent_seq_id(entry, seq_idx),
+                "source_seq_id": str(entry.get("parent_item_id", entry.get("item_id", f"seq_{seq_idx}"))),
                 "v2_last_sequence_only": bool(CONFIG.get("V2_LAST_SEQUENCE_ONLY", False)),
                 "hist_start": int(t - target_ctx_len),
                 "hist_end": int(t),
